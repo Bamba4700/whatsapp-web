@@ -1,0 +1,1117 @@
+const express = require('express');
+const multer = require('multer');
+const { randomUUID } = require('node:crypto');
+
+const pool = require('../config/database');
+
+const {
+  storage,
+  bucket,
+} = require('../config/storage');
+
+const {
+  requireAuth,
+} = require('../middleware/auth');
+
+const {
+  requireCsrf,
+} = require('../middleware/csrf');
+
+
+const router = express.Router();
+
+
+const MAX_FILE_SIZE =
+  20 * 1024 * 1024;
+
+const MAX_VOICE_DURATION =
+  10 * 60 * 1000;
+
+
+const upload =
+  multer({
+    storage:
+      multer.memoryStorage(),
+
+    limits: {
+      fileSize:
+        MAX_FILE_SIZE,
+    },
+  });
+
+
+function isUuid(value) {
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      .test(value)
+  );
+}
+
+
+async function isMember(
+  conversationId,
+  userId
+) {
+  const result =
+    await pool.query(
+      `
+        SELECT 1
+
+        FROM conversation_members
+
+        WHERE
+          conversation_id = $1
+          AND user_id = $2
+          AND left_at IS NULL
+
+        LIMIT 1
+      `,
+      [
+        conversationId,
+        userId,
+      ]
+    );
+
+
+  return result.rowCount > 0;
+}
+
+
+async function getSender(
+  userId
+) {
+  const result =
+    await pool.query(
+      `
+        SELECT
+          id,
+          username,
+          display_name
+
+        FROM users
+
+        WHERE id = $1
+
+        LIMIT 1
+      `,
+      [
+        userId,
+      ]
+    );
+
+
+  return result.rows[0] || null;
+}
+
+
+function publicMessage(
+  message,
+  sender,
+  mine
+) {
+  return {
+    id:
+      message.id,
+
+    conversationId:
+      message.conversation_id,
+
+    senderId:
+      message.sender_id,
+
+    clientMessageId:
+      message.client_message_id,
+
+    kind:
+      message.kind,
+
+    body:
+      message.body,
+
+    originalName:
+      message.original_name,
+
+    mimeType:
+      message.mime_type,
+
+    sizeBytes:
+      message.size_bytes === null
+        ? null
+        : Number(
+          message.size_bytes
+        ),
+
+    durationMs:
+      message.duration_ms,
+
+    fileUrl:
+      message.kind === 'file'
+        ? `/api/messages/${message.id}/file`
+        : null,
+
+    voiceUrl:
+      message.kind === 'voice'
+        ? `/api/messages/${message.id}/voice`
+        : null,
+
+    sender: sender
+      ? {
+          id:
+            sender.id,
+
+          username:
+            sender.username,
+
+          displayName:
+            sender.display_name,
+        }
+      : null,
+
+    mine:
+      Boolean(mine),
+
+    createdAt:
+      message.created_at,
+  };
+}
+
+
+async function emitMessage(
+  req,
+  message
+) {
+  const io =
+    req.app.get('io');
+
+
+  if (!io) {
+    return;
+  }
+
+
+  const result =
+    await pool.query(
+      `
+        SELECT user_id
+
+        FROM conversation_members
+
+        WHERE
+          conversation_id = $1
+          AND left_at IS NULL
+          AND user_id <> $2
+      `,
+      [
+        message.conversationId,
+        req.session.userId,
+      ]
+    );
+
+
+  const realtimeMessage = {
+    ...message,
+    mine: false,
+  };
+
+
+  for (
+    const member
+    of result.rows
+  ) {
+    io
+      .to(
+        `user:${member.user_id}`
+      )
+      .emit(
+        'message:new',
+        realtimeMessage
+      );
+  }
+}
+
+
+function safeFilename(
+  value,
+  fallback
+) {
+  const name =
+    String(
+      value || fallback
+    )
+      .replace(
+        /[\r\n"]/g,
+        '_'
+      );
+
+
+  return (
+    name
+      .replace(
+        /[^\x20-\x7E]/g,
+        '_'
+      )
+      .slice(0, 180) ||
+    fallback
+  );
+}
+
+
+function contentDisposition(
+  mode,
+  originalName,
+  fallback
+) {
+  const safe =
+    safeFilename(
+      originalName,
+      fallback
+    );
+
+
+  const encoded =
+    encodeURIComponent(
+      originalName || fallback
+    );
+
+
+  return (
+    `${mode}; ` +
+    `filename="${safe}"; ` +
+    `filename*=UTF-8''${encoded}`
+  );
+}
+
+
+function isAllowedVoiceMime(
+  mimeType
+) {
+  return [
+    'audio/webm',
+    'audio/ogg',
+    'audio/mp4',
+    'audio/mpeg',
+    'audio/wav',
+    'audio/x-wav',
+    'audio/aac',
+  ].includes(
+    String(mimeType)
+      .toLowerCase()
+  );
+}
+
+
+/*
+ * =========================================================
+ * ENVOI D'UN FICHIER / IMAGE
+ *
+ * POST /api/conversations/:conversationId/files
+ * =========================================================
+ */
+
+router.post(
+  '/:conversationId/files',
+  requireAuth,
+  requireCsrf,
+  upload.single('file'),
+
+  async (req, res, next) => {
+    const conversationId =
+      req.params.conversationId;
+
+    const userId =
+      req.session.userId;
+
+
+    if (
+      !isUuid(conversationId)
+    ) {
+      return res
+        .status(400)
+        .json({
+          error:
+            'Conversation invalide.',
+        });
+    }
+
+
+    if (!req.file) {
+      return res
+        .status(400)
+        .json({
+          error:
+            'Aucun fichier reçu.',
+        });
+    }
+
+
+    if (
+      req.file.size <= 0
+    ) {
+      return res
+        .status(400)
+        .json({
+          error:
+            'Le fichier est vide.',
+        });
+    }
+
+
+    let storageKey = null;
+    let objectStored = false;
+
+
+    try {
+      const member =
+        await isMember(
+          conversationId,
+          userId
+        );
+
+
+      if (!member) {
+        return res
+          .status(403)
+          .json({
+            error:
+              'Accès refusé à cette conversation.',
+          });
+      }
+
+
+      const messageId =
+        randomUUID();
+
+      const clientMessageId =
+        randomUUID();
+
+
+      storageKey =
+        `${conversationId}/${messageId}`;
+
+
+      const mimeType =
+        req.file.mimetype ||
+        'application/octet-stream';
+
+
+      await storage.putObject(
+        bucket,
+        storageKey,
+        req.file.buffer,
+        req.file.size,
+        {
+          'Content-Type':
+            mimeType,
+        }
+      );
+
+
+      objectStored = true;
+
+
+      const result =
+        await pool.query(
+          `
+            INSERT INTO messages (
+              id,
+              conversation_id,
+              sender_id,
+              client_message_id,
+              kind,
+              body,
+              storage_bucket,
+              storage_key,
+              original_name,
+              mime_type,
+              size_bytes,
+              duration_ms
+            )
+
+            VALUES (
+              $1,
+              $2,
+              $3,
+              $4,
+              'file',
+              NULL,
+              $5,
+              $6,
+              $7,
+              $8,
+              $9,
+              NULL
+            )
+
+            RETURNING
+              id,
+              conversation_id,
+              sender_id,
+              client_message_id,
+              kind,
+              body,
+              storage_bucket,
+              storage_key,
+              original_name,
+              mime_type,
+              size_bytes,
+              duration_ms,
+              created_at
+          `,
+          [
+            messageId,
+            conversationId,
+            userId,
+            clientMessageId,
+            bucket,
+            storageKey,
+            req.file.originalname,
+            mimeType,
+            req.file.size,
+          ]
+        );
+
+
+      const sender =
+        await getSender(
+          userId
+        );
+
+
+      const message =
+        publicMessage(
+          result.rows[0],
+          sender,
+          true
+        );
+
+
+      await emitMessage(
+        req,
+        message
+      );
+
+
+      return res
+        .status(201)
+        .json({
+          message,
+        });
+
+    } catch (error) {
+      if (
+        objectStored &&
+        storageKey
+      ) {
+        try {
+          await storage.removeObject(
+            bucket,
+            storageKey
+          );
+
+        } catch (
+          cleanupError
+        ) {
+          console.error(
+            'Nettoyage MinIO impossible :',
+            cleanupError
+          );
+        }
+      }
+
+
+      next(error);
+    }
+  }
+);
+
+
+/*
+ * =========================================================
+ * ENVOI D'UN MESSAGE VOCAL
+ *
+ * POST /api/conversations/:conversationId/voice
+ * =========================================================
+ */
+
+router.post(
+  '/:conversationId/voice',
+  requireAuth,
+  requireCsrf,
+  upload.single('file'),
+
+  async (req, res, next) => {
+    const conversationId =
+      req.params.conversationId;
+
+    const userId =
+      req.session.userId;
+
+
+    if (
+      !isUuid(conversationId)
+    ) {
+      return res
+        .status(400)
+        .json({
+          error:
+            'Conversation invalide.',
+        });
+    }
+
+
+    if (!req.file) {
+      return res
+        .status(400)
+        .json({
+          error:
+            'Aucun enregistrement audio reçu.',
+        });
+    }
+
+
+    if (
+      req.file.size <= 0
+    ) {
+      return res
+        .status(400)
+        .json({
+          error:
+            'Enregistrement audio vide.',
+        });
+    }
+
+
+    if (
+      !isAllowedVoiceMime(
+        req.file.mimetype
+      )
+    ) {
+      return res
+        .status(415)
+        .json({
+          error:
+            'Format audio non pris en charge.',
+        });
+    }
+
+
+    const durationMs =
+      Number.parseInt(
+        req.body.durationMs,
+        10
+      );
+
+
+    if (
+      !Number.isInteger(
+        durationMs
+      ) ||
+      durationMs <= 0 ||
+      durationMs >
+        MAX_VOICE_DURATION
+    ) {
+      return res
+        .status(400)
+        .json({
+          error:
+            'Durée du message vocal invalide.',
+        });
+    }
+
+
+    let storageKey = null;
+    let objectStored = false;
+
+
+    try {
+      const member =
+        await isMember(
+          conversationId,
+          userId
+        );
+
+
+      if (!member) {
+        return res
+          .status(403)
+          .json({
+            error:
+              'Accès refusé à cette conversation.',
+          });
+      }
+
+
+      const messageId =
+        randomUUID();
+
+      const clientMessageId =
+        randomUUID();
+
+
+      storageKey =
+        `${conversationId}/voice/${messageId}`;
+
+
+      const mimeType =
+        req.file.mimetype;
+
+
+      await storage.putObject(
+        bucket,
+        storageKey,
+        req.file.buffer,
+        req.file.size,
+        {
+          'Content-Type':
+            mimeType,
+        }
+      );
+
+
+      objectStored = true;
+
+
+      const result =
+        await pool.query(
+          `
+            INSERT INTO messages (
+              id,
+              conversation_id,
+              sender_id,
+              client_message_id,
+              kind,
+              body,
+              storage_bucket,
+              storage_key,
+              original_name,
+              mime_type,
+              size_bytes,
+              duration_ms
+            )
+
+            VALUES (
+              $1,
+              $2,
+              $3,
+              $4,
+              'voice',
+              NULL,
+              $5,
+              $6,
+              $7,
+              $8,
+              $9,
+              $10
+            )
+
+            RETURNING
+              id,
+              conversation_id,
+              sender_id,
+              client_message_id,
+              kind,
+              body,
+              storage_bucket,
+              storage_key,
+              original_name,
+              mime_type,
+              size_bytes,
+              duration_ms,
+              created_at
+          `,
+          [
+            messageId,
+            conversationId,
+            userId,
+            clientMessageId,
+            bucket,
+            storageKey,
+            req.file.originalname,
+            mimeType,
+            req.file.size,
+            durationMs,
+          ]
+        );
+
+
+      const sender =
+        await getSender(
+          userId
+        );
+
+
+      const message =
+        publicMessage(
+          result.rows[0],
+          sender,
+          true
+        );
+
+
+      await emitMessage(
+        req,
+        message
+      );
+
+
+      return res
+        .status(201)
+        .json({
+          message,
+        });
+
+    } catch (error) {
+      if (
+        objectStored &&
+        storageKey
+      ) {
+        try {
+          await storage.removeObject(
+            bucket,
+            storageKey
+          );
+
+        } catch (
+          cleanupError
+        ) {
+          console.error(
+            'Nettoyage vocal MinIO impossible :',
+            cleanupError
+          );
+        }
+      }
+
+
+      next(error);
+    }
+  }
+);
+
+
+/*
+ * =========================================================
+ * LECTURE / TÉLÉCHARGEMENT FICHIER
+ *
+ * GET /api/messages/:messageId/file
+ * =========================================================
+ */
+
+router.get(
+  '/messages/:messageId/file',
+  requireAuth,
+
+  async (req, res, next) => {
+    const messageId =
+      req.params.messageId;
+
+
+    if (!isUuid(messageId)) {
+      return res
+        .status(400)
+        .json({
+          error:
+            'Message invalide.',
+        });
+    }
+
+
+    try {
+      const result =
+        await pool.query(
+          `
+            SELECT
+              m.storage_bucket,
+              m.storage_key,
+              m.original_name,
+              m.mime_type,
+              m.size_bytes
+
+            FROM messages m
+
+            JOIN conversation_members cm
+              ON cm.conversation_id =
+                 m.conversation_id
+
+            WHERE
+              m.id = $1
+              AND m.kind = 'file'
+              AND cm.user_id = $2
+              AND cm.left_at IS NULL
+
+            LIMIT 1
+          `,
+          [
+            messageId,
+            req.session.userId,
+          ]
+        );
+
+
+      if (
+        result.rowCount === 0
+      ) {
+        return res
+          .status(404)
+          .json({
+            error:
+              'Fichier introuvable.',
+          });
+      }
+
+
+      const file =
+        result.rows[0];
+
+
+      const safeInlineTypes =
+        new Set([
+          'image/jpeg',
+          'image/png',
+          'image/gif',
+          'image/webp',
+        ]);
+
+
+      const download =
+        req.query.download === '1';
+
+
+      const disposition =
+        download ||
+        !safeInlineTypes.has(
+          file.mime_type
+        )
+          ? 'attachment'
+          : 'inline';
+
+
+      res.set(
+        'Content-Type',
+        file.mime_type ||
+        'application/octet-stream'
+      );
+
+
+      res.set(
+        'X-Content-Type-Options',
+        'nosniff'
+      );
+
+
+      if (
+        file.size_bytes !== null
+      ) {
+        res.set(
+          'Content-Length',
+          String(
+            file.size_bytes
+          )
+        );
+      }
+
+
+      res.set(
+        'Content-Disposition',
+        contentDisposition(
+          disposition,
+          file.original_name,
+          'fichier'
+        )
+      );
+
+
+      const stream =
+        await storage.getObject(
+          file.storage_bucket,
+          file.storage_key
+        );
+
+
+      stream.on(
+        'error',
+        next
+      );
+
+
+      stream.pipe(res);
+
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+
+/*
+ * =========================================================
+ * LECTURE D'UN MESSAGE VOCAL
+ *
+ * GET /api/messages/:messageId/voice
+ * =========================================================
+ */
+
+router.get(
+  '/messages/:messageId/voice',
+  requireAuth,
+
+  async (req, res, next) => {
+    const messageId =
+      req.params.messageId;
+
+
+    if (!isUuid(messageId)) {
+      return res
+        .status(400)
+        .json({
+          error:
+            'Message invalide.',
+        });
+    }
+
+
+    try {
+      const result =
+        await pool.query(
+          `
+            SELECT
+              m.storage_bucket,
+              m.storage_key,
+              m.original_name,
+              m.mime_type,
+              m.size_bytes
+
+            FROM messages m
+
+            JOIN conversation_members cm
+              ON cm.conversation_id =
+                 m.conversation_id
+
+            WHERE
+              m.id = $1
+              AND m.kind = 'voice'
+              AND cm.user_id = $2
+              AND cm.left_at IS NULL
+
+            LIMIT 1
+          `,
+          [
+            messageId,
+            req.session.userId,
+          ]
+        );
+
+
+      if (
+        result.rowCount === 0
+      ) {
+        return res
+          .status(404)
+          .json({
+            error:
+              'Message vocal introuvable.',
+          });
+      }
+
+
+      const voice =
+        result.rows[0];
+
+
+      res.set(
+        'Content-Type',
+        voice.mime_type ||
+        'audio/webm'
+      );
+
+
+      res.set(
+        'X-Content-Type-Options',
+        'nosniff'
+      );
+
+
+      res.set(
+        'Content-Disposition',
+        contentDisposition(
+          'inline',
+          voice.original_name,
+          'message-vocal.webm'
+        )
+      );
+
+
+      if (
+        voice.size_bytes !== null
+      ) {
+        res.set(
+          'Content-Length',
+          String(
+            voice.size_bytes
+          )
+        );
+      }
+
+
+      const stream =
+        await storage.getObject(
+          voice.storage_bucket,
+          voice.storage_key
+        );
+
+
+      stream.on(
+        'error',
+        next
+      );
+
+
+      stream.pipe(res);
+
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+
+/*
+ * =========================================================
+ * ERREURS MULTER
+ * =========================================================
+ */
+
+router.use(
+  (error, req, res, next) => {
+    if (
+      error instanceof
+      multer.MulterError
+    ) {
+      if (
+        error.code ===
+        'LIMIT_FILE_SIZE'
+      ) {
+        return res
+          .status(413)
+          .json({
+            error:
+              'Le fichier dépasse la limite de 20 Mo.',
+          });
+      }
+
+
+      return res
+        .status(400)
+        .json({
+          error:
+            'Envoi du fichier invalide.',
+        });
+    }
+
+
+    next(error);
+  }
+);
+
+
+module.exports = router;

@@ -1,0 +1,882 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+
+  <meta charset="UTF-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  >
+
+  <title><%= title %></title>
+
+
+  <link
+    rel="stylesheet"
+    href="/css/style.css"
+  >
+
+  <link
+    rel="stylesheet"
+    href="/css/groups.css"
+  >
+
+  <link
+    rel="stylesheet"
+    href="/css/sidebar-tabs.css"
+  >
+
+  <link
+    rel="stylesheet"
+    href="/css/calls.css"
+  >
+
+
+  <link
+    rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,400,0,0"
+  >
+
+</head>
+
+
+<body>
+
+  <main class="app-shell">
+
+
+    <!-- =====================================================
+         AUTHENTIFICATION
+    ====================================================== -->
+    <section
+      id="auth-section"
+      class="auth-screen"
+    >
+
+      <div class="auth-brand">
+
+        <h1>
+          WebRTC Messenger
+        </h1>
+
+        <p id="secure-status">
+          Vérification du contexte sécurisé...
+        </p>
+
+      </div>
+
+
+      <div class="auth-grid">
+
+
+        <form
+          id="login-form"
+          class="auth-card"
+        >
+
+          <h2>
+            Connexion
+          </h2>
+
+
+          <label for="login-username">
+            Identifiant
+          </label>
+
+          <input
+            id="login-username"
+            name="username"
+            type="text"
+            minlength="3"
+            maxlength="30"
+            autocomplete="username"
+            required
+          >
+
+
+          <label for="login-password">
+            Mot de passe
+          </label>
+
+          <input
+            id="login-password"
+            name="password"
+            type="password"
+            minlength="8"
+            autocomplete="current-password"
+            required
+          >
+
+
+          <button type="submit">
+            Se connecter
+          </button>
+
+        </form>
+
+
+
+        <form
+          id="register-form"
+          class="auth-card"
+        >
+
+          <h2>
+            Créer un compte
+          </h2>
+
+
+          <label for="register-display-name">
+            Nom affiché
+          </label>
+
+          <input
+            id="register-display-name"
+            name="displayName"
+            type="text"
+            maxlength="80"
+            required
+          >
+
+
+          <label for="register-username">
+            Identifiant
+          </label>
+
+          <input
+            id="register-username"
+            name="username"
+            type="text"
+            minlength="3"
+            maxlength="30"
+            pattern="[a-zA-Z0-9_]+"
+            autocomplete="username"
+            required
+          >
+
+
+          <label for="register-password">
+            Mot de passe
+          </label>
+
+          <input
+            id="register-password"
+            name="password"
+            type="password"
+            minlength="8"
+            autocomplete="new-password"
+            required
+          >
+
+
+          <button type="submit">
+            S'inscrire
+          </button>
+
+        </form>
+
+      </div>
+
+    </section>
+
+
+
+    <!-- =====================================================
+         APPLICATION
+    ====================================================== -->
+    <section
+      id="app-section"
+      class="messenger-layout hidden"
+    >
+
+
+      <!-- SIDEBAR -->
+      <aside class="sidebar">
+
+
+        <header class="sidebar-header">
+
+
+          <div class="profile-block">
+
+            <div class="avatar-circle">
+
+              <span class="material-symbols-rounded">
+                person
+              </span>
+
+            </div>
+
+
+            <div
+              id="current-user"
+              class="profile-user"
+            ></div>
+
+          </div>
+
+
+
+          <div class="sidebar-header-actions">
+
+
+            <button
+              id="new-chat-button"
+              type="button"
+              class="sidebar-action-button"
+              aria-label="Nouvelle discussion privée"
+              title="Nouvelle discussion privée"
+            >
+
+              <span class="material-symbols-rounded">
+                chat_add_on
+              </span>
+
+            </button>
+
+
+
+            <button
+              id="new-group-button"
+              type="button"
+              class="sidebar-action-button"
+              aria-label="Nouveau groupe"
+              title="Nouveau groupe"
+            >
+
+              <span class="material-symbols-rounded">
+                group_add
+              </span>
+
+            </button>
+
+
+
+            <button
+              id="logout-button"
+              type="button"
+              class="sidebar-action-button"
+              aria-label="Se déconnecter"
+              title="Se déconnecter"
+            >
+
+              <span class="material-symbols-rounded">
+                logout
+              </span>
+
+            </button>
+
+          </div>
+
+        </header>
+
+
+
+        <div class="sidebar-body">
+
+
+          <!-- ONGLETS -->
+          <div
+            class="sidebar-tabs"
+            role="tablist"
+          >
+
+            <button
+              id="private-tab"
+              type="button"
+              class="sidebar-tab active"
+              role="tab"
+              aria-selected="true"
+            >
+
+              <span class="material-symbols-rounded">
+                person
+              </span>
+
+              <span>
+                Privée
+              </span>
+
+            </button>
+
+
+
+            <button
+              id="groups-tab"
+              type="button"
+              class="sidebar-tab"
+              role="tab"
+              aria-selected="false"
+            >
+
+              <span class="material-symbols-rounded">
+                groups
+              </span>
+
+              <span>
+                Groupes
+              </span>
+
+            </button>
+
+          </div>
+
+
+
+          <div class="sidebar-tab-content">
+
+
+            <!-- PRIVÉE -->
+            <section
+              id="private-view"
+              class="sidebar-view"
+            >
+
+              <p
+                id="users-status"
+                role="status"
+                class="users-status"
+              ></p>
+
+
+              <ul
+                id="users-list"
+                class="users-list"
+              ></ul>
+
+            </section>
+
+
+
+            <!-- GROUPES -->
+            <section
+              id="groups-view"
+              class="sidebar-view hidden"
+            >
+
+              <ul
+                id="groups-list"
+                class="groups-list"
+              ></ul>
+
+            </section>
+
+          </div>
+
+
+
+          <!-- NOUVELLE DISCUSSION -->
+          <section
+            id="discovery-panel"
+            class="discovery-panel hidden"
+          >
+
+            <header class="discovery-header">
+
+              <button
+                id="close-discovery"
+                type="button"
+                class="sidebar-action-button"
+                aria-label="Retour"
+                title="Retour"
+              >
+
+                <span class="material-symbols-rounded">
+                  arrow_back
+                </span>
+
+              </button>
+
+
+              <h3>
+                Nouvelle discussion
+              </h3>
+
+            </header>
+
+
+            <div
+              id="discovery-list"
+              class="discovery-list"
+            ></div>
+
+          </section>
+
+
+
+          <!-- CRÉATION GROUPE -->
+          <section
+            id="group-panel"
+            class="group-panel hidden"
+          >
+
+            <header class="group-panel-header">
+
+              <button
+                id="close-group-panel"
+                type="button"
+                class="sidebar-action-button"
+                aria-label="Retour"
+                title="Retour"
+              >
+
+                <span class="material-symbols-rounded">
+                  arrow_back
+                </span>
+
+              </button>
+
+
+              <h3>
+                Nouveau groupe
+              </h3>
+
+            </header>
+
+
+
+            <form
+              id="group-form"
+              class="group-form"
+            >
+
+              <div class="group-name-zone">
+
+                <div class="group-create-avatar">
+
+                  <span class="material-symbols-rounded">
+                    groups
+                  </span>
+
+                </div>
+
+
+                <input
+                  id="group-title-input"
+                  type="text"
+                  maxlength="100"
+                  autocomplete="off"
+                  placeholder="Nom du groupe"
+                  required
+                >
+
+              </div>
+
+
+              <p class="group-members-label">
+                Sélectionnez les membres
+              </p>
+
+
+              <p
+                id="group-status"
+                class="group-status"
+                role="status"
+              ></p>
+
+
+              <div
+                id="group-members-list"
+                class="group-members-list"
+              ></div>
+
+
+              <div class="group-create-footer">
+
+                <button
+                  id="create-group-button"
+                  type="submit"
+                  class="create-group-button"
+                >
+
+                  <span class="material-symbols-rounded">
+                    check
+                  </span>
+
+                  Créer le groupe
+
+                </button>
+
+              </div>
+
+            </form>
+
+          </section>
+
+        </div>
+
+      </aside>
+
+
+
+      <!-- ===================================================
+           CONVERSATION
+      ==================================================== -->
+      <section
+        id="conversation-card"
+        class="chat-panel hidden"
+      >
+
+
+        <header class="chat-header">
+
+
+          <div class="chat-contact-avatar">
+
+            <span class="material-symbols-rounded">
+              person
+            </span>
+
+          </div>
+
+
+
+          <div class="chat-title-block">
+
+            <h2 id="conversation-title"></h2>
+
+            <p
+              id="conversation-status"
+              role="status"
+              class="conversation-status"
+            ></p>
+
+          </div>
+
+
+
+          <div class="chat-header-actions">
+
+
+            <!-- APPEL AUDIO -->
+            <button
+              id="audio-call-button"
+              type="button"
+              class="call-action-button"
+              aria-label="Appel audio"
+              title="Appel audio"
+              disabled
+            >
+
+              <svg
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <path
+                  d="M7.2 3.4 9.6 3a1.6 1.6 0 0 1 1.7.94l1.26 2.95a1.6 1.6 0 0 1-.37 1.77l-1.55 1.55a14.2 14.2 0 0 0 3.15 3.15l1.55-1.55a1.6 1.6 0 0 1 1.77-.37l2.95 1.26a1.6 1.6 0 0 1 .94 1.7l-.4 2.4A3.2 3.2 0 0 1 17.44 20C10.02 20 4 13.98 4 6.56A3.2 3.2 0 0 1 7.2 3.4Z"
+                />
+              </svg>
+
+            </button>
+
+
+
+            <!-- APPEL VIDÉO -->
+            <button
+              id="video-call-button"
+              type="button"
+              class="call-action-button"
+              aria-label="Appel vidéo"
+              title="Appel vidéo"
+              disabled
+            >
+
+              <svg
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <rect
+                  x="3"
+                  y="6"
+                  width="13"
+                  height="12"
+                  rx="3"
+                />
+
+                <path
+                  d="M16 10.2 21 7.5v9L16 13.8"
+                />
+              </svg>
+
+            </button>
+
+          </div>
+
+        </header>
+
+
+
+        <!-- MESSAGES -->
+        <ul
+          id="messages-list"
+          class="messages-list"
+          aria-live="polite"
+        ></ul>
+
+
+
+        <!-- COMPOSER -->
+        <footer class="chat-composer">
+
+
+          <input
+            id="file-input"
+            type="file"
+            hidden
+          >
+
+
+          <div
+            id="selected-file-name"
+            class="selected-file-name"
+          ></div>
+
+
+
+          <div
+            id="sticker-panel"
+            class="sticker-panel hidden"
+          >
+
+            <button type="button" class="sticker-option" data-sticker="😀">😀</button>
+            <button type="button" class="sticker-option" data-sticker="😂">😂</button>
+            <button type="button" class="sticker-option" data-sticker="😍">😍</button>
+            <button type="button" class="sticker-option" data-sticker="🥰">🥰</button>
+            <button type="button" class="sticker-option" data-sticker="😎">😎</button>
+            <button type="button" class="sticker-option" data-sticker="🤔">🤔</button>
+            <button type="button" class="sticker-option" data-sticker="😭">😭</button>
+            <button type="button" class="sticker-option" data-sticker="😡">😡</button>
+
+            <button type="button" class="sticker-option" data-sticker="👍">👍</button>
+            <button type="button" class="sticker-option" data-sticker="👏">👏</button>
+            <button type="button" class="sticker-option" data-sticker="🙏">🙏</button>
+            <button type="button" class="sticker-option" data-sticker="💪">💪</button>
+            <button type="button" class="sticker-option" data-sticker="❤️">❤️</button>
+            <button type="button" class="sticker-option" data-sticker="🔥">🔥</button>
+            <button type="button" class="sticker-option" data-sticker="🎉">🎉</button>
+            <button type="button" class="sticker-option" data-sticker="✅">✅</button>
+
+          </div>
+
+
+
+          <form
+            id="message-form"
+            class="message-form"
+          >
+
+
+            <button
+              id="choose-file"
+              type="button"
+              class="composer-action"
+              aria-label="Joindre un fichier"
+              title="Joindre un fichier"
+            >
+
+              <span class="material-symbols-rounded">
+                attach_file
+              </span>
+
+            </button>
+
+
+
+            <button
+              id="sticker-button"
+              type="button"
+              class="composer-action"
+              aria-label="Emoji et stickers"
+              title="Emoji et stickers"
+            >
+
+              <span class="material-symbols-rounded">
+                add_reaction
+              </span>
+
+            </button>
+
+
+
+            <input
+              id="message-input"
+              type="text"
+              maxlength="4000"
+              autocomplete="off"
+              placeholder="Entrez un message"
+              aria-label="Message"
+              required
+            >
+
+
+
+            <button
+              id="voice-button"
+              type="button"
+              class="composer-action voice-button"
+              aria-label="Message vocal"
+              title="Message vocal"
+            >
+
+              <span class="material-symbols-rounded">
+                mic
+              </span>
+
+            </button>
+
+
+
+            <button
+              id="send-message"
+              type="submit"
+              class="send-button hidden"
+              aria-label="Envoyer"
+              title="Envoyer"
+            >
+
+              <span class="material-symbols-rounded">
+                send
+              </span>
+
+            </button>
+
+          </form>
+
+        </footer>
+
+      </section>
+
+
+
+      <!-- AUCUNE CONVERSATION -->
+      <section
+        id="empty-chat-state"
+        class="chat-empty-state"
+      >
+
+        <div class="empty-chat-box">
+
+          <span
+            class="material-symbols-rounded empty-chat-icon"
+          >
+            forum
+          </span>
+
+
+          <h2>
+            WebRTC Messenger
+          </h2>
+
+
+          <p>
+            Sélectionnez une conversation pour commencer.
+          </p>
+
+        </div>
+
+      </section>
+
+    </section>
+
+
+
+    <p
+      id="message"
+      role="status"
+      class="global-status"
+    ></p>
+
+  </main>
+
+
+
+  <!-- JAVASCRIPT -->
+
+  <script src="/js/setup-check.js"></script>
+
+  <script src="/js/auth.js"></script>
+
+  <script src="/js/groups.js"></script>
+
+  <script src="/js/users.js"></script>
+
+  <script src="/socket.io/socket.io.js"></script>
+
+  <script src="/js/messages.js"></script>
+
+  <script src="/js/sidebar-tabs.js"></script>
+
+  <script src="/js/calls.js"></script>
+
+
+
+  <!-- ÉTAT VIDE -->
+  <script>
+    (() => {
+
+      const conversationCard =
+        document.getElementById(
+          'conversation-card'
+        );
+
+      const emptyChatState =
+        document.getElementById(
+          'empty-chat-state'
+        );
+
+
+      if (
+        !conversationCard ||
+        !emptyChatState
+      ) {
+        return;
+      }
+
+
+      function syncEmptyState() {
+
+        const opened =
+          !conversationCard
+            .classList
+            .contains(
+              'hidden'
+            );
+
+
+        emptyChatState
+          .classList
+          .toggle(
+            'hidden',
+            opened
+          );
+      }
+
+
+      const observer =
+        new MutationObserver(
+          syncEmptyState
+        );
+
+
+      observer.observe(
+        conversationCard,
+        {
+          attributes:
+            true,
+
+          attributeFilter:
+            ['class'],
+        }
+      );
+
+
+      syncEmptyState();
+
+    })();
+  </script>
+
+</body>
+
+</html>

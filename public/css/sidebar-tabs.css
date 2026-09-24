@@ -1,0 +1,184 @@
+/*
+ * =========================================================
+ * ONGLETS PRIVÉE / GROUPES
+ * =========================================================
+ */
+
+.sidebar-tabs {
+  width: 100%;
+
+  flex: 0 0 56px;
+
+  display: grid;
+
+  grid-template-columns:
+    1fr 1fr;
+
+  background: #ffffff;
+
+  border-bottom:
+    1px solid #e9edef;
+}
+
+
+.sidebar-tab {
+  position: relative;
+
+  min-width: 0;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  gap: 7px;
+
+  padding:
+    0 12px;
+
+  border: 0;
+  border-radius: 0;
+
+  background: transparent;
+
+  color: #667781;
+
+  font-size: 0.94rem;
+  font-weight: 600;
+
+  cursor: pointer;
+}
+
+
+.sidebar-tab:hover {
+  background: #f5f6f6;
+
+  color: #111b21;
+}
+
+
+.sidebar-tab.active {
+  color: #008069;
+}
+
+
+/*
+ * Trait sous l'onglet actif.
+ */
+.sidebar-tab.active::after {
+  content: '';
+
+  position: absolute;
+
+  left: 18px;
+  right: 18px;
+  bottom: 0;
+
+  height: 3px;
+
+  border-radius:
+    3px 3px 0 0;
+
+  background: #00a884;
+}
+
+
+.sidebar-tab
+.material-symbols-rounded {
+  font-size: 21px;
+}
+
+
+/*
+ * =========================================================
+ * CONTENU DES ONGLETS
+ * =========================================================
+ */
+
+.sidebar-tab-content {
+  flex: 1;
+
+  min-height: 0;
+
+  display: flex;
+  flex-direction: column;
+
+  overflow: hidden;
+}
+
+
+.sidebar-view {
+  flex: 1;
+
+  min-height: 0;
+
+  display: flex;
+  flex-direction: column;
+
+  overflow: hidden;
+}
+
+
+/*
+ * Conversation privée :
+ * toute la hauteur disponible.
+ */
+#private-view
+.users-list {
+  flex: 1;
+
+  min-height: 0;
+
+  overflow-y: auto;
+}
+
+
+/*
+ * Groupes :
+ * retirer l'ancienne limite de hauteur
+ * puisque la liste possède maintenant
+ * son propre onglet.
+ */
+#groups-view
+.groups-list {
+  flex: 1;
+
+  min-height: 0;
+
+  max-height: none;
+
+  overflow-y: auto;
+
+  border-bottom: 0;
+}
+
+
+/*
+ * L'ancien texte d'état ne prend aucune
+ * place lorsqu'il est vide.
+ */
+#private-view
+.users-status:empty {
+  display: none;
+}
+
+
+/*
+ * =========================================================
+ * MOBILE
+ * =========================================================
+ */
+
+@media (
+  max-width: 620px
+) {
+
+  .sidebar-tabs {
+    flex-basis: 54px;
+  }
+
+
+  .sidebar-tab {
+    font-size: 0.9rem;
+  }
+
+}
