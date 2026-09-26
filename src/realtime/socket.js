@@ -1,86 +1,97 @@
 const { randomUUID } = require('node:crypto');
-
 const pool = require('../config/database');
-
 
 const connectedUsers = new Map();
 
+// Appels privés existants.
 const activeCalls = new Map();
 
-const CALL_TIMEOUT_MS =
-  45 * 1000;
+// Appels de groupe.
+const activeGroupCalls = new Map();
+
+const CALL_TIMEOUT_MS = 45000;
 
 
 function isUuid(value) {
   return (
     typeof value === 'string' &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-      .test(value)
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
   );
 }
 
 
+function publicUser(user) {
+  if (!user) {
+    return null;
+  }
+
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.display_name,
+  };
+}
+
+
 async function getUser(userId) {
-  const result =
-    await pool.query(
-      `
-        SELECT
-          id,
-          username,
-          display_name
+  const result = await pool.query(
+    `
+      SELECT
+        id,
+        username,
+        display_name
 
-        FROM users
+      FROM users
 
-        WHERE id = $1
+      WHERE id = $1
 
-        LIMIT 1
-      `,
-      [
-        userId,
-      ]
-    );
-
+      LIMIT 1
+    `,
+    [userId]
+  );
 
   return result.rows[0] || null;
 }
 
+
+/*
+ * =========================================================
+ * APPEL PRIVÉ
+ * =========================================================
+ */
 
 async function canCall(
   conversationId,
   callerId,
   targetUserId
 ) {
-  const result =
-    await pool.query(
-      `
-        SELECT
-          c.id
+  const result = await pool.query(
+    `
+      SELECT c.id
 
-        FROM conversations c
+      FROM conversations c
 
-        JOIN conversation_members caller
-          ON caller.conversation_id = c.id
-         AND caller.user_id = $2
-         AND caller.left_at IS NULL
+      JOIN conversation_members caller
+        ON caller.conversation_id = c.id
+        AND caller.user_id = $2
+        AND caller.left_at IS NULL
 
-        JOIN conversation_members target
-          ON target.conversation_id = c.id
-         AND target.user_id = $3
-         AND target.left_at IS NULL
+      JOIN conversation_members target
+        ON target.conversation_id = c.id
+        AND target.user_id = $3
+        AND target.left_at IS NULL
 
-        WHERE
-          c.id = $1
-          AND c.kind = 'private'
+      WHERE c.id = $1
+        AND c.kind = 'private'
 
-        LIMIT 1
-      `,
-      [
-        conversationId,
-        callerId,
-        targetUserId,
-      ]
-    );
-
+      LIMIT 1
+    `,
+    [
+      conversationId,
+      callerId,
+      targetUserId,
+    ]
+  );
 
   return result.rowCount > 0;
 }
@@ -96,26 +107,209 @@ function otherParticipant(
     return call.calleeId;
   }
 
-
   if (
     call.calleeId === userId
   ) {
     return call.callerId;
   }
 
-
   return null;
 }
 
 
-function isUserBusy(userId) {
+function removeCall(call) {
+  clearTimeout(
+    call.timeout
+  );
+
+  activeCalls.delete(
+    call.id
+  );
+}
+
+
+/*
+ * =========================================================
+ * GROUPE
+ * =========================================================
+ */
+
+async function getGroupConversation(
+  conversationId,
+  callerId
+) {
+  const conversationResult =
+    await pool.query(
+      `
+        SELECT
+          c.id,
+          c.title
+
+        FROM conversations c
+
+        JOIN conversation_members caller
+          ON caller.conversation_id = c.id
+          AND caller.user_id = $2
+          AND caller.left_at IS NULL
+
+        WHERE c.id = $1
+          AND c.kind = 'group'
+
+        LIMIT 1
+      `,
+      [
+        conversationId,
+        callerId,
+      ]
+    );
+
+
+  if (
+    conversationResult.rowCount === 0
+  ) {
+    return null;
+  }
+
+
+  const membersResult =
+    await pool.query(
+      `
+        SELECT
+          u.id,
+          u.username,
+          u.display_name
+
+        FROM conversation_members cm
+
+        JOIN users u
+          ON u.id = cm.user_id
+
+        WHERE cm.conversation_id = $1
+          AND cm.left_at IS NULL
+
+        ORDER BY
+          cm.joined_at ASC,
+          u.username ASC
+      `,
+      [
+        conversationId,
+      ]
+    );
+
+
+  return {
+    id:
+      conversationResult
+        .rows[0]
+        .id,
+
+    title:
+      conversationResult
+        .rows[0]
+        .title,
+
+    members:
+      membersResult.rows,
+  };
+}
+
+
+async function isGroupMember(
+  conversationId,
+  userId
+) {
+  const result =
+    await pool.query(
+      `
+        SELECT 1
+
+        FROM conversations c
+
+        JOIN conversation_members cm
+          ON cm.conversation_id = c.id
+
+        WHERE c.id = $1
+          AND c.kind = 'group'
+          AND cm.user_id = $2
+          AND cm.left_at IS NULL
+
+        LIMIT 1
+      `,
+      [
+        conversationId,
+        userId,
+      ]
+    );
+
+
+  return result.rowCount > 0;
+}
+
+
+function isGroupParticipantBusyStatus(
+  status
+) {
+  return [
+    'invited',
+    'ringing',
+    'connecting',
+    'active',
+  ].includes(status);
+}
+
+
+/*
+ * =========================================================
+ * UTILISATEUR OCCUPÉ
+ * =========================================================
+ */
+
+function isUserBusy(
+  userId,
+  ignoredGroupCallId = null
+) {
+  const privateBusy =
+    Array
+      .from(
+        activeCalls.values()
+      )
+      .some(
+        call =>
+          call.callerId === userId ||
+          call.calleeId === userId
+      );
+
+
+  if (privateBusy) {
+    return true;
+  }
+
+
   for (
-    const call
-    of activeCalls.values()
+    const groupCall
+    of activeGroupCalls.values()
   ) {
     if (
-      call.callerId === userId ||
-      call.calleeId === userId
+      groupCall.id ===
+      ignoredGroupCallId
+    ) {
+      continue;
+    }
+
+
+    const participant =
+      groupCall
+        .participants
+        .get(
+          userId
+        );
+
+
+    if (
+      participant &&
+      isGroupParticipantBusyStatus(
+        participant.status
+      )
     ) {
       return true;
     }
@@ -126,24 +320,312 @@ function isUserBusy(userId) {
 }
 
 
+/*
+ * =========================================================
+ * OUTILS APPEL DE GROUPE
+ * =========================================================
+ */
+
+function groupCallParticipantPayload(
+  participant
+) {
+  return {
+    user:
+      participant.user,
+
+    status:
+      participant.status,
+  };
+}
+
+
+function activeGroupParticipants(
+  call,
+  exceptUserId = null
+) {
+  const participants =
+    [];
+
+
+  for (
+    const [
+      participantId,
+      participant,
+    ]
+    of call.participants
+  ) {
+    if (
+      participantId ===
+      exceptUserId
+    ) {
+      continue;
+    }
+
+
+    if (
+      participant.status !==
+      'active'
+    ) {
+      continue;
+    }
+
+
+    participants.push(
+      groupCallParticipantPayload(
+        participant
+      )
+    );
+  }
+
+
+  return participants;
+}
+
+
+function pendingGroupParticipants(
+  call
+) {
+  return Array
+    .from(
+      call.participants.values()
+    )
+    .filter(
+      participant =>
+        [
+          'invited',
+          'ringing',
+          'connecting',
+        ].includes(
+          participant.status
+        )
+    );
+}
+
+
+function emitToActiveGroupParticipants(
+  io,
+  call,
+  event,
+  payload,
+  exceptUserId = null
+) {
+  for (
+    const [
+      participantId,
+      participant,
+    ]
+    of call.participants
+  ) {
+    if (
+      participantId ===
+      exceptUserId
+    ) {
+      continue;
+    }
+
+
+    if (
+      participant.status !==
+      'active'
+    ) {
+      continue;
+    }
+
+
+    io
+      .to(
+        `user:${participantId}`
+      )
+      .emit(
+        event,
+        payload
+      );
+  }
+}
+
+
+function removeGroupCall(
+  io,
+  call,
+  reason = 'ended'
+) {
+  if (
+    !call ||
+    !activeGroupCalls.has(
+      call.id
+    )
+  ) {
+    return;
+  }
+
+
+  clearTimeout(
+    call.timeout
+  );
+
+
+  call.timeout =
+    null;
+
+
+  for (
+    const [
+      participantId,
+      participant,
+    ]
+    of call.participants
+  ) {
+    if (
+      [
+        'left',
+        'rejected',
+      ].includes(
+        participant.status
+      )
+    ) {
+      continue;
+    }
+
+
+    io
+      .to(
+        `user:${participantId}`
+      )
+      .emit(
+        'group-call:ended',
+        {
+          callId:
+            call.id,
+
+          conversationId:
+            call.conversationId,
+
+          reason,
+        }
+      );
+  }
+
+
+  activeGroupCalls.delete(
+    call.id
+  );
+}
+
+
+function finishGroupParticipant(
+  io,
+  call,
+  userId,
+  reason = 'left'
+) {
+  const participant =
+    call
+      ?.participants
+      .get(
+        userId
+      );
+
+
+  if (!participant) {
+    return false;
+  }
+
+
+  participant.status =
+    reason === 'rejected'
+      ? 'rejected'
+      : 'left';
+
+
+  emitToActiveGroupParticipants(
+    io,
+    call,
+    'group-call:participant-left',
+    {
+      callId:
+        call.id,
+
+      conversationId:
+        call.conversationId,
+
+      userId,
+
+      reason,
+    },
+    userId
+  );
+
+
+  return true;
+}
+
+
+function maybeRemoveEmptyGroupCall(
+  io,
+  call
+) {
+  if (
+    !call ||
+    !activeGroupCalls.has(
+      call.id
+    )
+  ) {
+    return;
+  }
+
+
+  const activeCount =
+    activeGroupParticipants(
+      call
+    ).length;
+
+
+  const pendingCount =
+    pendingGroupParticipants(
+      call
+    ).length;
+
+
+  if (
+    activeCount === 0 &&
+    pendingCount === 0
+  ) {
+    removeGroupCall(
+      io,
+      call,
+      'empty'
+    );
+  }
+}
+
+
+/*
+ * =========================================================
+ * SOCKET.IO
+ * =========================================================
+ */
+
 function configureSocket(
   io,
   sessionMiddleware
 ) {
-
   io.engine.use(
     sessionMiddleware
   );
 
+
+  /*
+   * =======================================================
+   * AUTHENTIFICATION SOCKET
+   * =======================================================
+   */
 
   io.use(
     async (
       socket,
       next
     ) => {
-
       try {
-
         const userId =
           socket.request
             ?.session
@@ -185,25 +667,29 @@ function configureSocket(
         next();
 
       } catch (error) {
-        next(error);
+        next(
+          error
+        );
       }
     }
   );
 
 
+  /*
+   * =======================================================
+   * CONNEXION
+   * =======================================================
+   */
+
   io.on(
     'connection',
-    (socket) => {
-
+    socket => {
       const userId =
         socket.data.userId;
 
 
       /*
-       * Room générale de l'utilisateur.
-       *
-       * Les messages ET les appels utilisent
-       * cette room.
+       * Room personnelle.
        */
       socket.join(
         `user:${userId}`
@@ -246,6 +732,7 @@ function configureSocket(
           'presence:update',
           {
             userId,
+
             online:
               true,
           }
@@ -263,18 +750,22 @@ function configureSocket(
 
       /*
        * =====================================================
-       * DÉMARRER UN APPEL
+       * APPELS PRIVÉS
+       *
+       * Partie existante conservée.
        * =====================================================
        */
 
+
+      /*
+       * INVITATION PRIVÉE
+       */
       socket.on(
         'call:invite',
-
         async (
           payload,
           acknowledgement
         ) => {
-
           const ack =
             typeof acknowledgement ===
             'function'
@@ -283,15 +774,12 @@ function configureSocket(
 
 
           try {
-
-            const conversationId =
-              payload?.conversationId;
-
-            const targetUserId =
-              payload?.targetUserId;
-
-            const kind =
-              payload?.kind;
+            const {
+              conversationId,
+              targetUserId,
+              kind,
+            } =
+              payload || {};
 
 
             if (
@@ -327,7 +815,8 @@ function configureSocket(
 
 
             if (
-              kind !== 'audio'
+              kind !== 'audio' &&
+              kind !== 'video'
             ) {
               return ack({
                 ok:
@@ -358,12 +847,13 @@ function configureSocket(
             }
 
 
-            /*
-             * On vérifie simplement que l'autre
-             * utilisateur est connecté.
-             *
-             * On ne dépend plus de callReadyUsers.
-             */
+            if (
+              !socket.connected
+            ) {
+              return;
+            }
+
+
             if (
               !connectedUsers.has(
                 targetUserId
@@ -380,19 +870,9 @@ function configureSocket(
 
 
             if (
-              isUserBusy(userId)
-            ) {
-              return ack({
-                ok:
-                  false,
-
-                error:
-                  'Vous avez déjà un appel en cours.',
-              });
-            }
-
-
-            if (
+              isUserBusy(
+                userId
+              ) ||
               isUserBusy(
                 targetUserId
               )
@@ -402,7 +882,7 @@ function configureSocket(
                   false,
 
                 error:
-                  'Cet utilisateur est déjà en appel.',
+                  'Un des utilisateurs est déjà en appel.',
               });
             }
 
@@ -427,8 +907,7 @@ function configureSocket(
               calleeId:
                 targetUserId,
 
-              kind:
-                'audio',
+              kind,
 
               status:
                 'invited',
@@ -441,21 +920,18 @@ function configureSocket(
             call.timeout =
               setTimeout(
                 () => {
-
-                  const current =
-                    activeCalls.get(
+                  if (
+                    !activeCalls.has(
                       callId
-                    );
-
-
-                  if (!current) {
+                    )
+                  ) {
                     return;
                   }
 
 
                   io
                     .to(
-                      `user:${current.callerId}`
+                      `user:${call.callerId}`
                     )
                     .emit(
                       'call:missed',
@@ -467,7 +943,7 @@ function configureSocket(
 
                   io
                     .to(
-                      `user:${current.calleeId}`
+                      `user:${call.calleeId}`
                     )
                     .emit(
                       'call:ended',
@@ -480,10 +956,9 @@ function configureSocket(
                     );
 
 
-                  activeCalls.delete(
-                    callId
+                  removeCall(
+                    call
                   );
-
                 },
                 CALL_TIMEOUT_MS
               );
@@ -496,13 +971,10 @@ function configureSocket(
 
 
             console.log(
-              `[CALL] ${userId} -> ${targetUserId} (${callId})`
+              `[CALL ${kind}] ${userId} -> ${targetUserId} (${callId})`
             );
 
 
-            /*
-             * L'appelant reçoit d'abord son callId.
-             */
             ack({
               ok:
                 true,
@@ -511,10 +983,6 @@ function configureSocket(
             });
 
 
-            /*
-             * Puis le correspondant reçoit
-             * l'appel entrant.
-             */
             io
               .to(
                 `user:${targetUserId}`
@@ -526,25 +994,16 @@ function configureSocket(
 
                   conversationId,
 
-                  kind:
-                    'audio',
+                  kind,
 
-                  caller: {
-                    id:
-                      caller.id,
-
-                    username:
-                      caller.username,
-
-                    displayName:
-                      caller.display_name,
-                  },
+                  caller:
+                    publicUser(
+                      caller
+                    ),
                 }
               );
 
-
           } catch (error) {
-
             console.error(
               '[CALL invite]',
               error
@@ -564,15 +1023,11 @@ function configureSocket(
 
 
       /*
-       * =====================================================
-       * LE DESTINATAIRE CONFIRME QU'IL SONNE
-       * =====================================================
+       * SONNERIE PRIVÉE
        */
-
       socket.on(
         'call:ringing',
-        (payload) => {
-
+        payload => {
           const call =
             activeCalls.get(
               payload?.callId
@@ -582,7 +1037,13 @@ function configureSocket(
           if (
             !call ||
             call.calleeId !==
-              userId
+              userId ||
+            ![
+              'invited',
+              'ringing',
+            ].includes(
+              call.status
+            )
           ) {
             return;
           }
@@ -608,15 +1069,11 @@ function configureSocket(
 
 
       /*
-       * =====================================================
-       * ACCEPTER
-       * =====================================================
+       * ACCEPTATION PRIVÉE
        */
-
       socket.on(
         'call:accept',
-        (payload) => {
-
+        payload => {
           const call =
             activeCalls.get(
               payload?.callId
@@ -626,23 +1083,25 @@ function configureSocket(
           if (
             !call ||
             call.calleeId !==
-              userId
+              userId ||
+            ![
+              'invited',
+              'ringing',
+            ].includes(
+              call.status
+            )
           ) {
             return;
           }
 
 
-          if (
+          clearTimeout(
             call.timeout
-          ) {
-            clearTimeout(
-              call.timeout
-            );
+          );
 
 
-            call.timeout =
-              null;
-          }
+          call.timeout =
+            null;
 
 
           call.status =
@@ -666,16 +1125,13 @@ function configureSocket(
                 conversationId:
                   call.conversationId,
 
-                user: {
-                  id:
-                    callee.id,
+                kind:
+                  call.kind,
 
-                  username:
-                    callee.username,
-
-                  displayName:
-                    callee.display_name,
-                },
+                user:
+                  publicUser(
+                    callee
+                  ),
               }
             );
         }
@@ -683,15 +1139,11 @@ function configureSocket(
 
 
       /*
-       * =====================================================
-       * REFUSER
-       * =====================================================
+       * REFUS PRIVÉ
        */
-
       socket.on(
         'call:reject',
-        (payload) => {
-
+        payload => {
           const call =
             activeCalls.get(
               payload?.callId
@@ -701,18 +1153,15 @@ function configureSocket(
           if (
             !call ||
             call.calleeId !==
-              userId
+              userId ||
+            ![
+              'invited',
+              'ringing',
+            ].includes(
+              call.status
+            )
           ) {
             return;
-          }
-
-
-          if (
-            call.timeout
-          ) {
-            clearTimeout(
-              call.timeout
-            );
           }
 
 
@@ -729,23 +1178,19 @@ function configureSocket(
             );
 
 
-          activeCalls.delete(
-            call.id
+          removeCall(
+            call
           );
         }
       );
 
 
       /*
-       * =====================================================
-       * WEBRTC OFFER
-       * =====================================================
+       * OFFRE WEBRTC PRIVÉE
        */
-
       socket.on(
         'webrtc:offer',
-        (payload) => {
-
+        payload => {
           const call =
             activeCalls.get(
               payload?.callId
@@ -754,27 +1199,22 @@ function configureSocket(
 
           if (
             !call ||
-            !payload?.description
+            call.callerId !==
+              userId ||
+            call.status !==
+              'connecting' ||
+            payload
+              ?.description
+              ?.type !==
+              'offer'
           ) {
-            return;
-          }
-
-
-          const targetId =
-            otherParticipant(
-              call,
-              userId
-            );
-
-
-          if (!targetId) {
             return;
           }
 
 
           io
             .to(
-              `user:${targetId}`
+              `user:${call.calleeId}`
             )
             .emit(
               'webrtc:offer',
@@ -791,15 +1231,11 @@ function configureSocket(
 
 
       /*
-       * =====================================================
-       * WEBRTC ANSWER
-       * =====================================================
+       * RÉPONSE WEBRTC PRIVÉE
        */
-
       socket.on(
         'webrtc:answer',
-        (payload) => {
-
+        payload => {
           const call =
             activeCalls.get(
               payload?.callId
@@ -808,20 +1244,15 @@ function configureSocket(
 
           if (
             !call ||
-            !payload?.description
+            call.calleeId !==
+              userId ||
+            call.status !==
+              'connecting' ||
+            payload
+              ?.description
+              ?.type !==
+              'answer'
           ) {
-            return;
-          }
-
-
-          const targetId =
-            otherParticipant(
-              call,
-              userId
-            );
-
-
-          if (!targetId) {
             return;
           }
 
@@ -832,7 +1263,7 @@ function configureSocket(
 
           io
             .to(
-              `user:${targetId}`
+              `user:${call.callerId}`
             )
             .emit(
               'webrtc:answer',
@@ -849,15 +1280,11 @@ function configureSocket(
 
 
       /*
-       * =====================================================
-       * ICE
-       * =====================================================
+       * ICE PRIVÉ
        */
-
       socket.on(
         'webrtc:ice-candidate',
-        (payload) => {
-
+        payload => {
           const call =
             activeCalls.get(
               payload?.callId
@@ -903,15 +1330,11 @@ function configureSocket(
 
 
       /*
-       * =====================================================
-       * RACCROCHER
-       * =====================================================
+       * RACCROCHAGE PRIVÉ
        */
-
       socket.on(
         'call:hangup',
-        (payload) => {
-
+        payload => {
           const call =
             activeCalls.get(
               payload?.callId
@@ -935,15 +1358,6 @@ function configureSocket(
           }
 
 
-          if (
-            call.timeout
-          ) {
-            clearTimeout(
-              call.timeout
-            );
-          }
-
-
           io
             .to(
               `user:${targetId}`
@@ -961,8 +1375,8 @@ function configureSocket(
             );
 
 
-          activeCalls.delete(
-            call.id
+          removeCall(
+            call
           );
         }
       );
@@ -970,116 +1384,1134 @@ function configureSocket(
 
       /*
        * =====================================================
-       * DÉCONNEXION
+       * APPELS AUDIO / VIDÉO EN GROUPE
+       * =====================================================
+       */
+
+
+      /*
+       * CRÉER UN APPEL DE GROUPE
+       */
+      socket.on(
+        'group-call:invite',
+        async (
+          payload,
+          acknowledgement
+        ) => {
+          const ack =
+            typeof acknowledgement ===
+            'function'
+              ? acknowledgement
+              : () => {};
+
+
+          try {
+            const conversationId =
+              payload
+                ?.conversationId;
+
+
+            const kind =
+              payload
+                ?.kind;
+
+
+            if (
+              !isUuid(
+                conversationId
+              )
+            ) {
+              return ack({
+                ok:
+                  false,
+
+                error:
+                  'Groupe invalide.',
+              });
+            }
+
+
+            if (
+              kind !== 'audio' &&
+              kind !== 'video'
+            ) {
+              return ack({
+                ok:
+                  false,
+
+                error:
+                  'Type d’appel non pris en charge.',
+              });
+            }
+
+
+            if (
+              isUserBusy(
+                userId
+              )
+            ) {
+              return ack({
+                ok:
+                  false,
+
+                error:
+                  'Vous êtes déjà en appel.',
+              });
+            }
+
+
+            const group =
+              await getGroupConversation(
+                conversationId,
+                userId
+              );
+
+
+            if (!group) {
+              return ack({
+                ok:
+                  false,
+
+                error:
+                  'Appel de groupe non autorisé.',
+              });
+            }
+
+
+            /*
+             * Inviter uniquement :
+             *
+             * - les membres du groupe ;
+             * - connectés ;
+             * - qui ne sont pas déjà occupés.
+             */
+            const onlineMembers =
+              group.members.filter(
+                member =>
+                  member.id !==
+                    userId &&
+                  connectedUsers.has(
+                    member.id
+                  ) &&
+                  !isUserBusy(
+                    member.id
+                  )
+              );
+
+
+            if (
+              onlineMembers.length ===
+              0
+            ) {
+              return ack({
+                ok:
+                  false,
+
+                error:
+                  'Aucun autre membre du groupe n’est disponible.',
+              });
+            }
+
+
+            const callId =
+              randomUUID();
+
+
+            const caller =
+              publicUser(
+                socket.data.user
+              );
+
+
+            const call = {
+              id:
+                callId,
+
+              conversationId,
+
+              groupTitle:
+                group.title,
+
+              callerId:
+                userId,
+
+              kind,
+
+              createdAt:
+                Date.now(),
+
+              timeout:
+                null,
+
+              participants:
+                new Map(),
+            };
+
+
+            /*
+             * L'appelant est déjà dans l'appel.
+             */
+            call
+              .participants
+              .set(
+                userId,
+                {
+                  user:
+                    caller,
+
+                  status:
+                    'active',
+                }
+              );
+
+
+            /*
+             * Membres invités.
+             */
+            for (
+              const member
+              of onlineMembers
+            ) {
+              call
+                .participants
+                .set(
+                  member.id,
+                  {
+                    user:
+                      publicUser(
+                        member
+                      ),
+
+                    status:
+                      'invited',
+                  }
+                );
+            }
+
+
+            /*
+             * Timeout de sonnerie.
+             */
+            call.timeout =
+              setTimeout(
+                () => {
+                  if (
+                    !activeGroupCalls.has(
+                      callId
+                    )
+                  ) {
+                    return;
+                  }
+
+
+                  let acceptedSomeone =
+                    false;
+
+
+                  for (
+                    const [
+                      participantId,
+                      participant,
+                    ]
+                    of call.participants
+                  ) {
+                    if (
+                      participant.status ===
+                      'active'
+                    ) {
+                      if (
+                        participantId !==
+                        call.callerId
+                      ) {
+                        acceptedSomeone =
+                          true;
+                      }
+
+                      continue;
+                    }
+
+
+                    if (
+                      ![
+                        'invited',
+                        'ringing',
+                        'connecting',
+                      ].includes(
+                        participant.status
+                      )
+                    ) {
+                      continue;
+                    }
+
+
+                    participant.status =
+                      'left';
+
+
+                    io
+                      .to(
+                        `user:${participantId}`
+                      )
+                      .emit(
+                        'group-call:ended',
+                        {
+                          callId:
+                            call.id,
+
+                          conversationId:
+                            call.conversationId,
+
+                          reason:
+                            'timeout',
+                        }
+                      );
+                  }
+
+
+                  /*
+                   * Personne n'a répondu.
+                   */
+                  if (
+                    !acceptedSomeone
+                  ) {
+                    io
+                      .to(
+                        `user:${call.callerId}`
+                      )
+                      .emit(
+                        'group-call:missed',
+                        {
+                          callId:
+                            call.id,
+
+                          conversationId:
+                            call.conversationId,
+                        }
+                      );
+
+
+                    removeGroupCall(
+                      io,
+                      call,
+                      'timeout'
+                    );
+
+
+                    return;
+                  }
+
+
+                  /*
+                   * Certains ont accepté :
+                   * l'appel continue.
+                   */
+                  call.timeout =
+                    null;
+
+                },
+                CALL_TIMEOUT_MS
+              );
+
+
+            activeGroupCalls.set(
+              callId,
+              call
+            );
+
+
+            console.log(
+              `[GROUP CALL ${kind}] ${userId} -> ${conversationId} (${callId})`
+            );
+
+
+            /*
+             * Réponse à l'appelant.
+             */
+            ack({
+              ok:
+                true,
+
+              callId,
+
+              conversationId,
+
+              kind,
+
+              groupTitle:
+                group.title,
+
+              invitedCount:
+                onlineMembers.length,
+            });
+
+
+            /*
+             * Sonnerie chez tous les membres.
+             */
+            for (
+              const member
+              of onlineMembers
+            ) {
+              io
+                .to(
+                  `user:${member.id}`
+                )
+                .emit(
+                  'group-call:incoming',
+                  {
+                    callId,
+
+                    conversationId,
+
+                    kind,
+
+                    groupTitle:
+                      group.title,
+
+                    caller,
+                  }
+                );
+            }
+
+          } catch (error) {
+            console.error(
+              '[GROUP CALL invite]',
+              error
+            );
+
+
+            ack({
+              ok:
+                false,
+
+              error:
+                'Impossible de démarrer l’appel de groupe.',
+            });
+          }
+        }
+      );
+
+
+      /*
+       * =====================================================
+       * SONNERIE GROUPE
+       * =====================================================
+       */
+
+      socket.on(
+        'group-call:ringing',
+        payload => {
+          const call =
+            activeGroupCalls.get(
+              payload?.callId
+            );
+
+
+          const participant =
+            call
+              ?.participants
+              .get(
+                userId
+              );
+
+
+          if (
+            !call ||
+            !participant ||
+            ![
+              'invited',
+              'ringing',
+            ].includes(
+              participant.status
+            )
+          ) {
+            return;
+          }
+
+
+          participant.status =
+            'ringing';
+
+
+          io
+            .to(
+              `user:${call.callerId}`
+            )
+            .emit(
+              'group-call:ringing',
+              {
+                callId:
+                  call.id,
+
+                conversationId:
+                  call.conversationId,
+
+                user:
+                  participant.user,
+              }
+            );
+        }
+      );
+
+
+      /*
+       * =====================================================
+       * ACCEPTATION GROUPE
+       * =====================================================
+       */
+
+      socket.on(
+        'group-call:accept',
+        async payload => {
+          const call =
+            activeGroupCalls.get(
+              payload?.callId
+            );
+
+
+          const participant =
+            call
+              ?.participants
+              .get(
+                userId
+              );
+
+
+          if (
+            !call ||
+            !participant ||
+            ![
+              'invited',
+              'ringing',
+            ].includes(
+              participant.status
+            )
+          ) {
+            return;
+          }
+
+
+          /*
+           * Vérifier que la personne appartient
+           * toujours au groupe.
+           */
+          const stillMember =
+            await isGroupMember(
+              call.conversationId,
+              userId
+            );
+
+
+          if (
+            !stillMember
+          ) {
+            participant.status =
+              'left';
+
+
+            socket.emit(
+              'group-call:ended',
+              {
+                callId:
+                  call.id,
+
+                conversationId:
+                  call.conversationId,
+
+                reason:
+                  'not-member',
+              }
+            );
+
+
+            maybeRemoveEmptyGroupCall(
+              io,
+              call
+            );
+
+
+            return;
+          }
+
+
+          participant.status =
+            'active';
+
+
+          /*
+           * Tous ceux déjà présents dans l'appel.
+           */
+          const existingParticipants =
+            activeGroupParticipants(
+              call,
+              userId
+            );
+
+
+          /*
+           * Informer celui qui vient d'accepter.
+           */
+          socket.emit(
+            'group-call:accepted',
+            {
+              callId:
+                call.id,
+
+              conversationId:
+                call.conversationId,
+
+              kind:
+                call.kind,
+
+              groupTitle:
+                call.groupTitle,
+
+              participants:
+                existingParticipants,
+            }
+          );
+
+
+          /*
+           * Informer les autres qu'un membre
+           * vient de rejoindre.
+           */
+          emitToActiveGroupParticipants(
+            io,
+            call,
+            'group-call:participant-joined',
+            {
+              callId:
+                call.id,
+
+              conversationId:
+                call.conversationId,
+
+              user:
+                participant.user,
+            },
+            userId
+          );
+        }
+      );
+
+
+      /*
+       * =====================================================
+       * REFUS GROUPE
+       * =====================================================
+       */
+
+      socket.on(
+        'group-call:reject',
+        payload => {
+          const call =
+            activeGroupCalls.get(
+              payload?.callId
+            );
+
+
+          const participant =
+            call
+              ?.participants
+              .get(
+                userId
+              );
+
+
+          if (
+            !call ||
+            !participant ||
+            ![
+              'invited',
+              'ringing',
+            ].includes(
+              participant.status
+            )
+          ) {
+            return;
+          }
+
+
+          participant.status =
+            'rejected';
+
+
+          /*
+           * Le refus d'une personne ne coupe pas
+           * l'appel pour les autres.
+           */
+          io
+            .to(
+              `user:${call.callerId}`
+            )
+            .emit(
+              'group-call:rejected',
+              {
+                callId:
+                  call.id,
+
+                conversationId:
+                  call.conversationId,
+
+                user:
+                  participant.user,
+              }
+            );
+
+
+          maybeRemoveEmptyGroupCall(
+            io,
+            call
+          );
+        }
+      );
+
+
+      /*
+       * =====================================================
+       * OFFRE WEBRTC GROUPE
+       *
+       * Chaque membre possède une connexion WebRTC
+       * avec chacun des autres membres.
+       * =====================================================
+       */
+
+      socket.on(
+        'group-webrtc:offer',
+        payload => {
+          const call =
+            activeGroupCalls.get(
+              payload?.callId
+            );
+
+
+          const fromParticipant =
+            call
+              ?.participants
+              .get(
+                userId
+              );
+
+
+          const toUserId =
+            payload
+              ?.toUserId;
+
+
+          const toParticipant =
+            call
+              ?.participants
+              .get(
+                toUserId
+              );
+
+
+          if (
+            !call ||
+            !fromParticipant ||
+            fromParticipant.status !==
+              'active' ||
+            !isUuid(
+              toUserId
+            ) ||
+            !toParticipant ||
+            toParticipant.status !==
+              'active' ||
+            payload
+              ?.description
+              ?.type !==
+              'offer'
+          ) {
+            return;
+          }
+
+
+          io
+            .to(
+              `user:${toUserId}`
+            )
+            .emit(
+              'group-webrtc:offer',
+              {
+                callId:
+                  call.id,
+
+                conversationId:
+                  call.conversationId,
+
+                fromUserId:
+                  userId,
+
+                fromUser:
+                  fromParticipant.user,
+
+                description:
+                  payload.description,
+              }
+            );
+        }
+      );
+
+
+      /*
+       * =====================================================
+       * RÉPONSE WEBRTC GROUPE
+       * =====================================================
+       */
+
+      socket.on(
+        'group-webrtc:answer',
+        payload => {
+          const call =
+            activeGroupCalls.get(
+              payload?.callId
+            );
+
+
+          const fromParticipant =
+            call
+              ?.participants
+              .get(
+                userId
+              );
+
+
+          const toUserId =
+            payload
+              ?.toUserId;
+
+
+          const toParticipant =
+            call
+              ?.participants
+              .get(
+                toUserId
+              );
+
+
+          if (
+            !call ||
+            !fromParticipant ||
+            fromParticipant.status !==
+              'active' ||
+            !isUuid(
+              toUserId
+            ) ||
+            !toParticipant ||
+            toParticipant.status !==
+              'active' ||
+            payload
+              ?.description
+              ?.type !==
+              'answer'
+          ) {
+            return;
+          }
+
+
+          io
+            .to(
+              `user:${toUserId}`
+            )
+            .emit(
+              'group-webrtc:answer',
+              {
+                callId:
+                  call.id,
+
+                conversationId:
+                  call.conversationId,
+
+                fromUserId:
+                  userId,
+
+                description:
+                  payload.description,
+              }
+            );
+        }
+      );
+
+
+      /*
+       * =====================================================
+       * ICE GROUPE
+       * =====================================================
+       */
+
+      socket.on(
+        'group-webrtc:ice-candidate',
+        payload => {
+          const call =
+            activeGroupCalls.get(
+              payload?.callId
+            );
+
+
+          const fromParticipant =
+            call
+              ?.participants
+              .get(
+                userId
+              );
+
+
+          const toUserId =
+            payload
+              ?.toUserId;
+
+
+          const toParticipant =
+            call
+              ?.participants
+              .get(
+                toUserId
+              );
+
+
+          if (
+            !call ||
+            !fromParticipant ||
+            fromParticipant.status !==
+              'active' ||
+            !isUuid(
+              toUserId
+            ) ||
+            !toParticipant ||
+            toParticipant.status !==
+              'active' ||
+            !payload?.candidate
+          ) {
+            return;
+          }
+
+
+          io
+            .to(
+              `user:${toUserId}`
+            )
+            .emit(
+              'group-webrtc:ice-candidate',
+              {
+                callId:
+                  call.id,
+
+                conversationId:
+                  call.conversationId,
+
+                fromUserId:
+                  userId,
+
+                candidate:
+                  payload.candidate,
+              }
+            );
+        }
+      );
+
+
+      /*
+       * =====================================================
+       * QUITTER UN APPEL DE GROUPE
+       * =====================================================
+       */
+
+      socket.on(
+        'group-call:leave',
+        payload => {
+          const call =
+            activeGroupCalls.get(
+              payload?.callId
+            );
+
+
+          if (!call) {
+            return;
+          }
+
+
+          const participant =
+            call
+              .participants
+              .get(
+                userId
+              );
+
+
+          if (
+            !participant ||
+            !isGroupParticipantBusyStatus(
+              participant.status
+            )
+          ) {
+            return;
+          }
+
+
+          finishGroupParticipant(
+            io,
+            call,
+            userId,
+            payload?.reason ||
+              'left'
+          );
+
+
+          maybeRemoveEmptyGroupCall(
+            io,
+            call
+          );
+        }
+      );
+
+
+      /*
+       * =====================================================
+       * DÉCONNEXION SOCKET
        * =====================================================
        */
 
       socket.on(
         'disconnect',
         () => {
-
-          const currentCount =
-            connectedUsers.get(
-              userId
-            ) || 0;
-
-
           const nextCount =
-            currentCount - 1;
+            (
+              connectedUsers.get(
+                userId
+              ) || 0
+            ) - 1;
 
 
+          /*
+           * L'utilisateur possède encore
+           * une autre connexion navigateur.
+           */
           if (
-            nextCount <= 0
+            nextCount > 0
           ) {
-
-            connectedUsers.delete(
-              userId
-            );
-
-
-            io.emit(
-              'presence:update',
-              {
-                userId,
-
-                online:
-                  false,
-              }
-            );
-
-
-            /*
-             * S'il ne reste aucune connexion
-             * pour cet utilisateur, ses appels
-             * sont terminés.
-             */
-            for (
-              const [
-                callId,
-                call,
-              ]
-              of activeCalls
-            ) {
-
-              if (
-                call.callerId !==
-                  userId &&
-                call.calleeId !==
-                  userId
-              ) {
-                continue;
-              }
-
-
-              if (
-                call.timeout
-              ) {
-                clearTimeout(
-                  call.timeout
-                );
-              }
-
-
-              const targetId =
-                otherParticipant(
-                  call,
-                  userId
-                );
-
-
-              if (targetId) {
-
-                io
-                  .to(
-                    `user:${targetId}`
-                  )
-                  .emit(
-                    'call:ended',
-                    {
-                      callId,
-
-                      reason:
-                        'disconnect',
-                    }
-                  );
-              }
-
-
-              activeCalls.delete(
-                callId
-              );
-            }
-
-          } else {
-
             connectedUsers.set(
               userId,
               nextCount
             );
+
+            return;
+          }
+
+
+          /*
+           * Complètement hors ligne.
+           */
+          connectedUsers.delete(
+            userId
+          );
+
+
+          io.emit(
+            'presence:update',
+            {
+              userId,
+
+              online:
+                false,
+            }
+          );
+
+
+          /*
+           * ===============================================
+           * APPELS PRIVÉS
+           * ===============================================
+           */
+
+          for (
+            const call
+            of Array.from(
+              activeCalls.values()
+            )
+          ) {
+            const targetId =
+              otherParticipant(
+                call,
+                userId
+              );
+
+
+            if (!targetId) {
+              continue;
+            }
+
+
+            io
+              .to(
+                `user:${targetId}`
+              )
+              .emit(
+                'call:ended',
+                {
+                  callId:
+                    call.id,
+
+                  reason:
+                    'disconnect',
+                }
+              );
+
+
+            removeCall(
+              call
+            );
+          }
+
+
+          /*
+           * ===============================================
+           * APPELS DE GROUPE
+           *
+           * Le départ d'un membre ne coupe PAS
+           * les autres participants.
+           * ===============================================
+           */
+
+          for (
+            const call
+            of Array.from(
+              activeGroupCalls.values()
+            )
+          ) {
+            const participant =
+              call
+                .participants
+                .get(
+                  userId
+                );
+
+
+            if (
+              !participant ||
+              !isGroupParticipantBusyStatus(
+                participant.status
+              )
+            ) {
+              continue;
+            }
+
+
+            finishGroupParticipant(
+              io,
+              call,
+              userId,
+              'disconnect'
+            );
+
+
+            maybeRemoveEmptyGroupCall(
+              io,
+              call
+            );
           }
         }
       );
-
     }
   );
 }
